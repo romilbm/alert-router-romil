@@ -1,5 +1,6 @@
 import fnmatch
-from datetime import datetime, timezone
+from datetime import timezone
+from datetime import timedelta
 
 from app.models import Alert, AlertResult, AppState, EvaluationDetails, RouteConfig, RoutedTo
 
@@ -38,7 +39,7 @@ def evaluate_alert(alert: Alert, state: AppState, dry_run: bool = False) -> Aler
       3. (active_hours check — deferred)
       4. Sort matching routes by priority descending.
       5. Winner = highest-priority match.
-      6. (Suppression check — deferred)
+      6. Suppression check on winner (uses alert.timestamp, not wall clock).
       7. Build AlertResult.
       8. Persist state and update stats (skipped when dry_run=True).
     """
@@ -51,19 +52,39 @@ def evaluate_alert(alert: Alert, state: AppState, dry_run: bool = False) -> Aler
     matched_route_ids = [r.id for r in matching_routes]
     winner = matching_routes[0] if matching_routes else None
 
+    suppressed = False
+    suppression_reason = None
+
+    if winner is not None and winner.suppression_window_seconds > 0:
+        key = (winner.id, alert.service)
+        expiry = state.suppression_windows.get(key)
+        if expiry is not None and alert.timestamp < expiry:
+            # Within active window — suppress. Do NOT update the window.
+            suppressed = True
+            expiry_utc = expiry.astimezone(timezone.utc)
+            suppression_reason = (
+                f"Alert for service '{alert.service}' on route '{winner.id}' "
+                f"suppressed until {expiry_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+            )
+        elif not dry_run:
+            # No active window (or expired) — route and set a fresh window.
+            state.suppression_windows[key] = (
+                alert.timestamp + timedelta(seconds=winner.suppression_window_seconds)
+            )
+
     routed_to = RoutedTo(route_id=winner.id, target=winner.target) if winner else None
 
     result = AlertResult(
         alert_id=alert.id,
         routed_to=routed_to,
-        suppressed=False,
-        suppression_reason=None,
+        suppressed=suppressed,
+        suppression_reason=suppression_reason,
         matched_routes=matched_route_ids,
         evaluation_details=EvaluationDetails(
             total_routes_evaluated=total_evaluated,
             routes_matched=len(matching_routes),
             routes_not_matched=total_evaluated - len(matching_routes),
-            suppression_applied=False,
+            suppression_applied=suppressed,
         ),
     )
 

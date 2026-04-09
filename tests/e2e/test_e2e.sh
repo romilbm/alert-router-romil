@@ -359,6 +359,109 @@ assert_eq "GET /alerts/{id} missing error body" \
   "$(curl -s "$BASE/alerts/does-not-exist" | jq -r '.error')" "alert not found"
 
 # ---------------------------------------------------------------------------
+# Suppression Windows
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Suppression Windows ==="
+
+# Timestamps relative to T0 = 2026-03-25T14:30:00Z, window = 300s, expiry = 14:35:00Z
+T0="2026-03-25T14:30:00Z"
+T_100="2026-03-25T14:31:40Z"   # +100s — within window
+T_299="2026-03-25T14:34:59Z"   # +299s — just inside
+T_300="2026-03-25T14:35:00Z"   # +300s — exactly at expiry (not suppressed)
+T_301="2026-03-25T14:35:01Z"   # +301s — just after expiry
+
+ROUTE_WITH_WINDOW='{
+  "id": "route-1",
+  "conditions": {},
+  "target": {"type": "slack", "channel": "#oncall"},
+  "priority": 10,
+  "suppression_window_seconds": 300
+}'
+
+mk_alert() {
+  local id="$1" ts="$2" svc="${3:-payment-api}"
+  printf '{"id":"%s","severity":"critical","service":"%s","group":"backend","timestamp":"%s"}' \
+    "$id" "$svc" "$ts"
+}
+
+# First alert routes normally
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" -d "$ROUTE_WITH_WINDOW" > /dev/null
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$(mk_alert a1 $T0)")
+assert_eq "Suppression: first alert not suppressed" \
+  "$(echo "$BODY" | jq -r '.suppressed')" "false"
+assert_eq "Suppression: first alert routed_to set" \
+  "$(echo "$BODY" | jq -r '.routed_to.route_id')" "route-1"
+assert_eq "Suppression: first alert suppression_reason null" \
+  "$(echo "$BODY" | jq -r '.suppression_reason')" "null"
+
+# Second alert within window — suppressed
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$(mk_alert a2 $T_100)")
+assert_eq "Suppression: second alert within window suppressed" \
+  "$(echo "$BODY" | jq -r '.suppressed')" "true"
+assert_eq "Suppression: suppressed alert still has routed_to" \
+  "$(echo "$BODY" | jq -r '.routed_to.route_id')" "route-1"
+assert_eq "Suppression: suppression_reason contains service" \
+  "$(echo "$BODY" | jq -r '.suppression_reason' | grep -c payment-api)" "1"
+assert_eq "Suppression: suppression_reason contains expiry 14:35:00Z" \
+  "$(echo "$BODY" | jq -r '.suppression_reason' | grep -c '14:35:00Z')" "1"
+assert_eq "Suppression: suppression_applied=true in evaluation_details" \
+  "$(echo "$BODY" | jq -r '.evaluation_details.suppression_applied')" "true"
+
+# Alert just before expiry — suppressed
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$(mk_alert a3 $T_299)")
+assert_eq "Suppression: alert at T-299s suppressed" \
+  "$(echo "$BODY" | jq -r '.suppressed')" "true"
+
+# Alert exactly at expiry boundary — NOT suppressed
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$(mk_alert a4 $T_300)")
+assert_eq "Suppression: alert at exact expiry (T+300s) not suppressed" \
+  "$(echo "$BODY" | jq -r '.suppressed')" "false"
+
+# Alert after expiry — routes again
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" -d "$ROUTE_WITH_WINDOW" > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$(mk_alert a1 $T0)" > /dev/null
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$(mk_alert a2 $T_301)")
+assert_eq "Suppression: alert after expiry routes normally" \
+  "$(echo "$BODY" | jq -r '.suppressed')" "false"
+assert_eq "Suppression: alert after expiry has no suppression_reason" \
+  "$(echo "$BODY" | jq -r '.suppression_reason')" "null"
+
+# Third alert — suppressed again under new window (T_301 + 300s = 14:40:01Z)
+T_WITHIN_NEW="2026-03-25T14:36:00Z"
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d "$(mk_alert a3 $T_WITHIN_NEW)")
+assert_eq "Suppression: alert within new window suppressed" \
+  "$(echo "$BODY" | jq -r '.suppressed')" "true"
+
+# Different service — not suppressed
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" -d "$ROUTE_WITH_WINDOW" > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$(mk_alert a1 $T0 payment-api)" > /dev/null
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d "$(mk_alert a2 $T_100 auth-service)")
+assert_eq "Suppression: different service not suppressed" \
+  "$(echo "$BODY" | jq -r '.suppressed')" "false"
+
+# payment-api still suppressed independently
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d "$(mk_alert a3 $T_100 payment-api)")
+assert_eq "Suppression: original service still suppressed" \
+  "$(echo "$BODY" | jq -r '.suppressed')" "true"
+
+# Zero suppression window — never suppresses
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"no-win","conditions":{},"target":{"type":"slack","channel":"#x"},"priority":1,"suppression_window_seconds":0}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$(mk_alert a1 $T0)" > /dev/null
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$(mk_alert a2 $T_100)")
+assert_eq "Suppression: zero window never suppresses" \
+  "$(echo "$BODY" | jq -r '.suppressed')" "false"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
