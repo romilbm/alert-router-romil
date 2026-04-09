@@ -9,7 +9,9 @@ router = APIRouter()
 
 @router.get("/stats")
 async def get_stats():
-    return app_state.stats
+    with app_state._lock:
+        stats = app_state.stats
+    return stats
 
 
 @router.post("/test")
@@ -20,5 +22,6 @@ async def dry_run_alert(alert: Alert):
 
 @router.post("/reset")
 async def reset_state():
-    app_state.reset()
+    with app_state._lock:
+        app_state.reset()
     return {"status": "ok"}

@@ -63,7 +63,9 @@ def evaluate_alert(alert: Alert, state: AppState, dry_run: bool = False) -> Aler
       7. Build AlertResult.
       8. Persist state and update stats (skipped when dry_run=True).
     """
-    all_routes = list(state.routes.values())
+    with state._lock:
+        all_routes = list(state.routes.values())
+
     total_evaluated = len(all_routes)
 
     matching_routes = [r for r in all_routes if matches_conditions(alert, r)]

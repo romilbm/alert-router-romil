@@ -23,15 +23,17 @@ async def list_alerts(
     routed: Optional[bool] = Query(default=None),
     suppressed: Optional[bool] = Query(default=None),
 ):
-    results = list(app_state.alerts.values())
+    with app_state._lock:
+        results = list(app_state.alerts.values())
+        inputs = dict(app_state.alert_inputs)
 
     if service is not None:
-        results = [r for r in results if app_state.alert_inputs.get(r.alert_id) and
-                   app_state.alert_inputs[r.alert_id].service == service]
+        results = [r for r in results if inputs.get(r.alert_id) and
+                   inputs[r.alert_id].service == service]
 
     if severity is not None:
-        results = [r for r in results if app_state.alert_inputs.get(r.alert_id) and
-                   app_state.alert_inputs[r.alert_id].severity == severity]
+        results = [r for r in results if inputs.get(r.alert_id) and
+                   inputs[r.alert_id].severity == severity]
 
     if routed is not None:
         results = [r for r in results if (r.routed_to is not None) == routed]
@@ -44,7 +46,8 @@ async def list_alerts(
 
 @router.get("/alerts/{alert_id}")
 async def get_alert(alert_id: str):
-    result = app_state.alerts.get(alert_id)
+    with app_state._lock:
+        result = app_state.alerts.get(alert_id)
     if result is None:
         return JSONResponse(status_code=404, content={"error": "alert not found"})
     return result

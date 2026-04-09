@@ -422,7 +422,19 @@ Pydantic v2 by default coerces `10.0` to `10` in lax mode. Use `model_config = C
 ### 12. `evaluation_details.routes_matched` counts routes that passed condition + active_hours
 The active hours check is part of "matching." A route that fails the active hours check should be counted in `routes_not_matched`, not `routes_matched`.
 
-### 13. Timezone validation must reject unknown strings
+### 13. Concurrency: all shared-state access is lock-protected
+`AppState` holds a `threading.Lock`. Every operation that reads or mutates shared state acquires this lock:
+
+- `evaluate_alert`: acquires the lock to snapshot `state.routes`, releases it while doing pure condition/active-hours matching (no shared state touched), then re-acquires it for the suppression window check-and-set and all side effects (storing result, updating stats).
+- `POST /routes`, `GET /routes`, `DELETE /routes`: all acquire the lock around route dict access and (for DELETE) suppression window cleanup.
+- `POST /alerts`, `GET /alerts`, `GET /alerts/{id}`: read paths snapshot `alerts` and `alert_inputs` under the lock, then filter outside it.
+- `GET /stats`: acquires the lock to read the stats reference.
+- `POST /reset`: acquires the lock around `AppState.reset()`.
+- `POST /test` (dry-run): goes through `evaluate_alert` with `dry_run=True`, which still acquires the lock for the route snapshot and the suppression read; it never writes state.
+
+This prevents the key races: two concurrent alerts for the same `(route_id, service)` both routing when one should be suppressed, a route mutation racing with an in-flight evaluation snapshot, and a read of alerts/stats racing with a concurrent write or reset.
+
+### 14. Timezone validation must reject unknown strings
 `zoneinfo.ZoneInfo("Invalid/Zone")` raises `ZoneInfoNotFoundError`. Catch this in the `field_validator` and raise a `ValueError` with a clear message. This also correctly rejects strings like `"EST"` which are not valid IANA zone names.
 
 ---

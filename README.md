@@ -214,7 +214,7 @@ Alert evaluation follows a strict pipeline (see [`Design.md § Routing Engine`](
 - **Glob service matching**: the pattern lives on the route, the value on the alert. `fnmatch("payment-api", "payment-*")` → `True`.
 - **Active hours boundaries**: `start` is inclusive, `end` is exclusive. Overnight windows (e.g., `22:00`–`06:00`) are handled with OR logic.
 - **Target response shape**: the same `Target` model is used for input and output. On output, `None` fields are omitted — a Slack target serializes as `{"type": "slack", "channel": "#oncall"}`, not a blob of `"address": null, "service_key": null, ...`.
-- **Concurrency**: the suppression check-and-set is protected by a `threading.Lock` on `AppState`, preventing two concurrent requests from both reading "no window" and both routing when only one should.
+- **Concurrency**: all shared-state reads and writes are protected by a `threading.Lock` on `AppState`. This covers route snapshots in `evaluate_alert`, route mutations (`POST`/`DELETE /routes`), suppression window check-and-set, stats updates, and `POST /reset` — preventing races across all concurrent requests.
 - **DELETE clears suppression windows**: deleting a route removes its suppression windows so a recreated route with the same ID starts fresh.
 
 ---
