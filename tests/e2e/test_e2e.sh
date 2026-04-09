@@ -92,10 +92,9 @@ assert_eq "GET /routes empty after reset" \
 reset_state
 curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" -d "$SLACK_ROUTE" > /dev/null
 BODY=$(curl -s -X DELETE "$BASE/routes/route-1")
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" -d "$SLACK_ROUTE" > /dev/null
 assert_eq "DELETE /routes/{id} returns 200" \
-  "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/routes" \
-    -H "Content-Type: application/json" -d "$SLACK_ROUTE" && \
-    curl -s -o /dev/null -w "%{http_code}" -X DELETE "$BASE/routes/route-1")" "200"
+  "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$BASE/routes/route-1")" "200"
 assert_eq "DELETE /routes/{id} deleted=true"  "$(echo "$BODY" | jq -r '.deleted')" "true"
 assert_eq "DELETE /routes/{id} id in response" "$(echo "$BODY" | jq -r '.id')"     "route-1"
 assert_eq "DELETE removes route from list" \
@@ -811,7 +810,7 @@ BODY=$(curl -s -X POST "$BASE/reset")
 assert_eq "Reset: returns {status: ok}" "$(echo "$BODY" | jq -r '.status')" "ok"
 
 # Verify routes cleared
-ROUTES=$(curl -s "$BASE/routes" | jq '. | length')
+ROUTES=$(curl -s "$BASE/routes" | jq '.routes | length')
 assert_eq "Reset: routes cleared" "$ROUTES" "0"
 
 # Verify alerts cleared
