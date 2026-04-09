@@ -2,7 +2,10 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.routers import routes
+
 app = FastAPI(title="Alert Routing Engine")
+app.include_router(routes.router)
 
 
 @app.exception_handler(RequestValidationError)
