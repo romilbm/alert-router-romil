@@ -578,6 +578,279 @@ for TS in "$INSIDE_ET" "$BEFORE_ET" "$AFTER_ET"; do
 done
 
 # ---------------------------------------------------------------------------
+# Query and filtering
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Query and filtering ==="
+reset_state
+
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"r1","conditions":{},"target":{"type":"slack","channel":"#x"},"priority":10}' > /dev/null
+
+# Submit alerts with different services and severities
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"f1","severity":"critical","service":"payment-api","group":"backend","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"f2","severity":"warning","service":"auth-service","group":"backend","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"f3","severity":"critical","service":"payment-api","group":"backend","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+
+# No filter — returns all
+TOTAL=$(curl -s "$BASE/alerts" | jq '.total')
+assert_eq "Filter: no filter returns all 3 alerts" "$TOTAL" "3"
+
+# Filter by service
+TOTAL=$(curl -s "$BASE/alerts?service=payment-api" | jq '.total')
+assert_eq "Filter: service=payment-api returns 2" "$TOTAL" "2"
+
+TOTAL=$(curl -s "$BASE/alerts?service=auth-service" | jq '.total')
+assert_eq "Filter: service=auth-service returns 1" "$TOTAL" "1"
+
+TOTAL=$(curl -s "$BASE/alerts?service=unknown" | jq '.total')
+assert_eq "Filter: service=unknown returns 0" "$TOTAL" "0"
+
+# Filter by severity
+TOTAL=$(curl -s "$BASE/alerts?severity=critical" | jq '.total')
+assert_eq "Filter: severity=critical returns 2" "$TOTAL" "2"
+
+TOTAL=$(curl -s "$BASE/alerts?severity=warning" | jq '.total')
+assert_eq "Filter: severity=warning returns 1" "$TOTAL" "1"
+
+# Filter by routed
+TOTAL=$(curl -s "$BASE/alerts?routed=true" | jq '.total')
+assert_eq "Filter: routed=true returns 3 (all routed)" "$TOTAL" "3"
+
+# Submit an unrouted alert (no matching route for warning on a severity-filtered route)
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"r2","conditions":{"severity":["warning"]},"target":{"type":"slack","channel":"#y"},"priority":10}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"u1","severity":"critical","service":"svc","group":"g","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+
+TOTAL=$(curl -s "$BASE/alerts?routed=false" | jq '.total')
+assert_eq "Filter: routed=false returns 1 unrouted alert" "$TOTAL" "1"
+
+# Filter by suppressed
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"r3","conditions":{},"target":{"type":"slack","channel":"#z"},"priority":10,"suppression_window_seconds":300}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"s1","severity":"critical","service":"svc","group":"g","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"s2","severity":"critical","service":"svc","group":"g","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+
+TOTAL=$(curl -s "$BASE/alerts?suppressed=true" | jq '.total')
+assert_eq "Filter: suppressed=true returns 1" "$TOTAL" "1"
+
+TOTAL=$(curl -s "$BASE/alerts?suppressed=false" | jq '.total')
+assert_eq "Filter: suppressed=false returns 1" "$TOTAL" "1"
+
+# Combined filters
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"r4","conditions":{},"target":{"type":"slack","channel":"#w"},"priority":10}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"c1","severity":"critical","service":"payment-api","group":"g","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"c2","severity":"warning","service":"payment-api","group":"g","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"c3","severity":"critical","service":"auth-service","group":"g","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+
+TOTAL=$(curl -s "$BASE/alerts?service=payment-api&severity=critical" | jq '.total')
+assert_eq "Filter: service=payment-api&severity=critical returns 1" "$TOTAL" "1"
+
+# ---------------------------------------------------------------------------
+# Stats
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Stats ==="
+reset_state
+
+# Initial stats
+TOTAL=$(curl -s "$BASE/stats" | jq '.total_alerts_processed')
+assert_eq "Stats: initial total_alerts_processed is 0" "$TOTAL" "0"
+
+ROUTED=$(curl -s "$BASE/stats" | jq '.total_routed')
+assert_eq "Stats: initial total_routed is 0" "$ROUTED" "0"
+
+BY_CRIT=$(curl -s "$BASE/stats" | jq '.by_severity.critical')
+assert_eq "Stats: initial by_severity.critical is 0" "$BY_CRIT" "0"
+
+BY_ROUTE=$(curl -s "$BASE/stats" | jq '.by_route | keys | length')
+assert_eq "Stats: initial by_route is empty" "$BY_ROUTE" "0"
+
+# After routing
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"stat-r","conditions":{},"target":{"type":"slack","channel":"#s"},"priority":10}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"stat1","severity":"critical","service":"payment-api","group":"g","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"stat2","severity":"warning","service":"auth-service","group":"g","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+
+TOTAL=$(curl -s "$BASE/stats" | jq '.total_alerts_processed')
+assert_eq "Stats: total_alerts_processed = 2 after two alerts" "$TOTAL" "2"
+
+ROUTED=$(curl -s "$BASE/stats" | jq '.total_routed')
+assert_eq "Stats: total_routed = 2" "$ROUTED" "2"
+
+BY_CRIT=$(curl -s "$BASE/stats" | jq '.by_severity.critical')
+assert_eq "Stats: by_severity.critical = 1" "$BY_CRIT" "1"
+
+BY_WARN=$(curl -s "$BASE/stats" | jq '.by_severity.warning')
+assert_eq "Stats: by_severity.warning = 1" "$BY_WARN" "1"
+
+SVC_COUNT=$(curl -s "$BASE/stats" | jq '.by_service["payment-api"]')
+assert_eq "Stats: by_service.payment-api = 1" "$SVC_COUNT" "1"
+
+ROUTE_MATCHED=$(curl -s "$BASE/stats" | jq '.by_route["stat-r"].total_matched')
+assert_eq "Stats: by_route.stat-r.total_matched = 2" "$ROUTE_MATCHED" "2"
+
+# Stats with suppression
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"sup-r","conditions":{},"target":{"type":"slack","channel":"#s"},"priority":10,"suppression_window_seconds":300}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"sup1","severity":"critical","service":"svc","group":"g","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"sup2","severity":"critical","service":"svc","group":"g","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+
+SUPPRESSED=$(curl -s "$BASE/stats" | jq '.total_suppressed')
+assert_eq "Stats: total_suppressed = 1" "$SUPPRESSED" "1"
+
+ROUTED=$(curl -s "$BASE/stats" | jq '.total_routed')
+assert_eq "Stats: total_routed = 1 (suppressed not double-counted)" "$ROUTED" "1"
+
+# ---------------------------------------------------------------------------
+# Dry-run
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Dry-run ==="
+reset_state
+
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"dr-r","conditions":{},"target":{"type":"slack","channel":"#d"},"priority":10}' > /dev/null
+
+# Dry-run returns correct result
+BODY=$(curl -s -X POST "$BASE/test" -H "Content-Type: application/json" \
+  -d '{"id":"dr1","severity":"critical","service":"svc","group":"g","timestamp":"2026-03-25T14:00:00Z"}')
+ROUTE=$(echo "$BODY" | jq -r '.routed_to.route_id')
+assert_eq "Dry-run: routes to correct route" "$ROUTE" "dr-r"
+
+# Dry-run alert not stored
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/alerts/dr1")
+assert_eq "Dry-run: alert not stored in /alerts/{id}" "$STATUS" "404"
+
+TOTAL=$(curl -s "$BASE/alerts" | jq '.total')
+assert_eq "Dry-run: /alerts returns 0 alerts" "$TOTAL" "0"
+
+# Dry-run does not update stats
+TOTAL=$(curl -s "$BASE/stats" | jq '.total_alerts_processed')
+assert_eq "Dry-run: stats not updated" "$TOTAL" "0"
+
+# Dry-run does not set suppression window
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"dr-r2","conditions":{},"target":{"type":"slack","channel":"#d"},"priority":10,"suppression_window_seconds":300}' > /dev/null
+
+curl -s -X POST "$BASE/test" -H "Content-Type: application/json" \
+  -d '{"id":"dry-alert","severity":"critical","service":"svc","group":"g","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+
+REAL=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"real1","severity":"critical","service":"svc","group":"g","timestamp":"2026-03-25T14:00:00Z"}')
+SUPPRESSED=$(echo "$REAL" | jq '.suppressed')
+assert_eq "Dry-run: real alert not suppressed after dry-run" "$SUPPRESSED" "false"
+
+# Dry-run reads existing suppression window
+REAL2=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"real2","severity":"critical","service":"svc","group":"g","timestamp":"2026-03-25T14:01:00Z"}')
+# Second real alert within window is suppressed
+SUPPRESSED2=$(echo "$REAL2" | jq '.suppressed')
+assert_eq "Dry-run: real alert within window is suppressed" "$SUPPRESSED2" "true"
+
+DRY=$(curl -s -X POST "$BASE/test" -H "Content-Type: application/json" \
+  -d '{"id":"dry2","severity":"critical","service":"svc","group":"g","timestamp":"2026-03-25T14:02:00Z"}')
+DRY_SUPPRESSED=$(echo "$DRY" | jq '.suppressed')
+assert_eq "Dry-run: reports suppressed when within existing window" "$DRY_SUPPRESSED" "true"
+
+# Dry-run validation error
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/test" -H "Content-Type: application/json" \
+  -d '{"id":"bad","severity":"invalid","service":"s","group":"g","timestamp":"2026-03-25T14:00:00Z"}')
+assert_eq "Dry-run: invalid severity returns 400" "$STATUS" "400"
+
+# ---------------------------------------------------------------------------
+# Full reset
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Full reset ==="
+
+# Populate state
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"rst-r","conditions":{},"target":{"type":"slack","channel":"#r"},"priority":10,"suppression_window_seconds":300}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"rst1","severity":"critical","service":"svc","group":"g","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"rst2","severity":"critical","service":"svc","group":"g","timestamp":"2026-03-25T14:00:00Z"}' > /dev/null
+
+# Verify populated
+TOTAL=$(curl -s "$BASE/alerts" | jq '.total')
+assert_eq "Reset pre-check: 2 alerts before reset" "$TOTAL" "2"
+
+STATS=$(curl -s "$BASE/stats" | jq '.total_alerts_processed')
+assert_eq "Reset pre-check: stats populated before reset" "$STATS" "2"
+
+# Reset
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/reset")
+assert_eq "Reset: returns 200" "$STATUS" "200"
+
+BODY=$(curl -s -X POST "$BASE/reset")
+assert_eq "Reset: returns {status: ok}" "$(echo "$BODY" | jq -r '.status')" "ok"
+
+# Verify routes cleared
+ROUTES=$(curl -s "$BASE/routes" | jq '. | length')
+assert_eq "Reset: routes cleared" "$ROUTES" "0"
+
+# Verify alerts cleared
+TOTAL=$(curl -s "$BASE/alerts" | jq '.total')
+assert_eq "Reset: alerts cleared" "$TOTAL" "0"
+
+ALERT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/alerts/rst1")
+assert_eq "Reset: alert rst1 not found after reset" "$ALERT_STATUS" "404"
+
+# Verify stats cleared
+STATS=$(curl -s "$BASE/stats" | jq '.total_alerts_processed')
+assert_eq "Reset: stats.total_alerts_processed = 0" "$STATS" "0"
+
+BY_ROUTE=$(curl -s "$BASE/stats" | jq '.by_route | keys | length')
+assert_eq "Reset: by_route cleared" "$BY_ROUTE" "0"
+
+# Verify suppression window cleared — re-add route and send alert, should NOT be suppressed
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"rst-r","conditions":{},"target":{"type":"slack","channel":"#r"},"priority":10,"suppression_window_seconds":300}' > /dev/null
+
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d '{"id":"rst3","severity":"critical","service":"svc","group":"g","timestamp":"2026-03-25T14:00:00Z"}')
+assert_eq "Reset: first alert after reset not suppressed" \
+  "$(echo "$BODY" | jq '.suppressed')" "false"
+
+# Verify state fully functional after reset
+assert_eq "Reset: alert routes correctly after reset" \
+  "$(echo "$BODY" | jq -r '.routed_to.route_id')" "rst-r"
+
+STATS=$(curl -s "$BASE/stats" | jq '.total_alerts_processed')
+assert_eq "Reset: stats accumulate from zero after reset" "$STATS" "1"
+
+# Reset is idempotent
+reset_state
+reset_state
+TOTAL=$(curl -s "$BASE/alerts" | jq '.total')
+assert_eq "Reset: idempotent — alerts still empty after double reset" "$TOTAL" "0"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 

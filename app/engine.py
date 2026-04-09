@@ -114,6 +114,7 @@ def evaluate_alert(alert: Alert, state: AppState, dry_run: bool = False) -> Aler
 
     if not dry_run:
         state.alerts[alert.id] = result
+        state.alert_inputs[alert.id] = alert
         _update_stats(alert, result, winner, state)
 
     return result

@@ -158,6 +158,7 @@ class AppState:
     def __init__(self) -> None:
         self.routes: Dict[str, RouteConfig] = {}
         self.alerts: Dict[str, AlertResult] = {}
+        self.alert_inputs: Dict[str, "Alert"] = {}
         # (route_id, service) -> expiry datetime (UTC, timezone-aware)
         self.suppression_windows: Dict[Tuple[str, str], datetime] = {}
         self.stats: Stats = Stats()
@@ -165,5 +166,6 @@ class AppState:
     def reset(self) -> None:
         self.routes.clear()
         self.alerts.clear()
+        self.alert_inputs.clear()
         self.suppression_windows.clear()
         self.stats = Stats()
