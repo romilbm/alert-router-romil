@@ -197,6 +197,168 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/routes" \
 assert_eq "POST /routes invalid time value returns 400" "$STATUS" "400"
 
 # ---------------------------------------------------------------------------
+# Basic Routing
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Basic Routing ==="
+
+ALERT='{
+  "id": "alert-1",
+  "severity": "critical",
+  "service": "payment-api",
+  "group": "backend",
+  "timestamp": "2026-03-25T14:30:00Z",
+  "labels": {"env": "production"}
+}'
+
+# POST /alerts returns 200
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"r1","conditions":{},"target":{"type":"slack","channel":"#oncall"},"priority":10}' > /dev/null
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/alerts" \
+  -H "Content-Type: application/json" -d "$ALERT")
+assert_eq "POST /alerts returns 200" "$STATUS" "200"
+
+# Routed to correct route
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$ALERT")
+assert_eq "POST /alerts routed_to.route_id" \
+  "$(echo "$BODY" | jq -r '.routed_to.route_id')" "r1"
+assert_eq "POST /alerts suppressed=false" \
+  "$(echo "$BODY" | jq -r '.suppressed')" "false"
+assert_eq "POST /alerts alert_id" \
+  "$(echo "$BODY" | jq -r '.alert_id')" "alert-1"
+
+# Unrouted — no routes
+reset_state
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$ALERT")
+assert_eq "POST /alerts unrouted routed_to=null" \
+  "$(echo "$BODY" | jq -r '.routed_to')" "null"
+assert_eq "POST /alerts unrouted matched_routes empty" \
+  "$(echo "$BODY" | jq '.matched_routes | length')" "0"
+
+# Unrouted — no conditions match
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"info-only","conditions":{"severity":["info"]},"target":{"type":"slack","channel":"#x"},"priority":1}' > /dev/null
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$ALERT")
+assert_eq "POST /alerts unrouted when no conditions match" \
+  "$(echo "$BODY" | jq -r '.routed_to')" "null"
+
+# Highest priority wins
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"low","conditions":{},"target":{"type":"slack","channel":"#low"},"priority":1}' > /dev/null
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"high","conditions":{},"target":{"type":"slack","channel":"#high"},"priority":99}' > /dev/null
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"mid","conditions":{},"target":{"type":"slack","channel":"#mid"},"priority":50}' > /dev/null
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$ALERT")
+assert_eq "POST /alerts highest priority route wins" \
+  "$(echo "$BODY" | jq -r '.routed_to.route_id')" "high"
+
+# All matching routes appear in matched_routes
+assert_eq "POST /alerts all matching routes in matched_routes" \
+  "$(echo "$BODY" | jq '.matched_routes | length')" "3"
+
+# Non-matching route not in matched_routes
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"match","conditions":{"severity":["critical"]},"target":{"type":"slack","channel":"#match"},"priority":10}' > /dev/null
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"no-match","conditions":{"severity":["info"]},"target":{"type":"slack","channel":"#nm"},"priority":5}' > /dev/null
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$ALERT")
+assert_eq "POST /alerts non-matching route excluded from matched_routes" \
+  "$(echo "$BODY" | jq '.matched_routes | length')" "1"
+assert_eq "POST /alerts matched_routes contains correct route" \
+  "$(echo "$BODY" | jq -r '.matched_routes[0]')" "match"
+
+# evaluation_details counts
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"m1","conditions":{"severity":["critical"]},"target":{"type":"slack","channel":"#x"},"priority":10}' > /dev/null
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"m2","conditions":{"severity":["critical","warning"]},"target":{"type":"slack","channel":"#y"},"priority":5}' > /dev/null
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"n1","conditions":{"severity":["info"]},"target":{"type":"slack","channel":"#z"},"priority":1}' > /dev/null
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$ALERT")
+assert_eq "POST /alerts evaluation_details.total_routes_evaluated" \
+  "$(echo "$BODY" | jq '.evaluation_details.total_routes_evaluated')" "3"
+assert_eq "POST /alerts evaluation_details.routes_matched" \
+  "$(echo "$BODY" | jq '.evaluation_details.routes_matched')" "2"
+assert_eq "POST /alerts evaluation_details.routes_not_matched" \
+  "$(echo "$BODY" | jq '.evaluation_details.routes_not_matched')" "1"
+assert_eq "POST /alerts evaluation_details.suppression_applied=false" \
+  "$(echo "$BODY" | jq '.evaluation_details.suppression_applied')" "false"
+
+# Glob matching: payment-*
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"pay-glob","conditions":{"service":["payment-*"]},"target":{"type":"slack","channel":"#x"},"priority":10}' > /dev/null
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$ALERT")
+assert_eq "POST /alerts glob payment-* matches payment-api" \
+  "$(echo "$BODY" | jq -r '.routed_to.route_id')" "pay-glob"
+WORKER=$(echo "$ALERT" | jq '.id = "a2" | .service = "payment-worker"')
+assert_eq "POST /alerts glob payment-* matches payment-worker" \
+  "$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+    -d "$WORKER" | jq -r '.routed_to.route_id')" "pay-glob"
+OTHER=$(echo "$ALERT" | jq '.id = "a3" | .service = "auth-service"')
+assert_eq "POST /alerts glob payment-* does not match auth-service" \
+  "$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+    -d "$OTHER" | jq -r '.routed_to')" "null"
+
+# Empty conditions is catch-all
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"catch-all","conditions":{},"target":{"type":"slack","channel":"#all"},"priority":1}' > /dev/null
+for SEV in critical warning info; do
+  A=$(echo "$ALERT" | jq --arg s "$SEV" --arg id "a-$SEV" '.severity = $s | .id = $id')
+  assert_eq "POST /alerts empty conditions matches severity=$SEV" \
+    "$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+      -d "$A" | jq -r '.routed_to.route_id')" "catch-all"
+done
+
+# Alert validation — 400s
+reset_state
+for FIELD in severity service group timestamp; do
+  BODY=$(echo "$ALERT" | jq "del(.$FIELD)")
+  STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/alerts" \
+    -H "Content-Type: application/json" -d "$BODY")
+  assert_eq "POST /alerts missing $FIELD returns 400" "$STATUS" "400"
+done
+
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/alerts" \
+  -H "Content-Type: application/json" \
+  -d "$(echo "$ALERT" | jq '.severity = "urgent"')")
+assert_eq "POST /alerts invalid severity returns 400" "$STATUS" "400"
+
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/alerts" \
+  -H "Content-Type: application/json" \
+  -d "$(echo "$ALERT" | jq '.timestamp = "not-a-date"')")
+assert_eq "POST /alerts invalid timestamp returns 400" "$STATUS" "400"
+
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/alerts" \
+  -H "Content-Type: application/json" \
+  -d "$(echo "$ALERT" | jq '.timestamp = "2026-03-25T14:30:00"')")
+assert_eq "POST /alerts naive timestamp (no tz) returns 400" "$STATUS" "400"
+
+# GET /alerts/{id}
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"r1","conditions":{},"target":{"type":"slack","channel":"#x"},"priority":10}' > /dev/null
+curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" -d "$ALERT" > /dev/null
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/alerts/alert-1")
+assert_eq "GET /alerts/{id} returns 200" "$STATUS" "200"
+assert_eq "GET /alerts/{id} correct alert_id" \
+  "$(curl -s "$BASE/alerts/alert-1" | jq -r '.alert_id')" "alert-1"
+
+# GET /alerts/{id} — 404
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/alerts/does-not-exist")
+assert_eq "GET /alerts/{id} missing returns 404" "$STATUS" "404"
+assert_eq "GET /alerts/{id} missing error body" \
+  "$(curl -s "$BASE/alerts/does-not-exist" | jq -r '.error')" "alert not found"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
