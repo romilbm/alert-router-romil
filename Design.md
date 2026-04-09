@@ -6,7 +6,7 @@ This service is a configurable alert routing engine — similar in concept to Pa
 
 ### Tech Stack
 
-- **Python 3.12**: Strong standard library support for datetime/timezone handling (`zoneinfo`), `fnmatch` for glob matching, and clean data modeling via Pydantic. Python's expressiveness keeps the routing logic readable.
+- **Python 3.13**: Strong standard library support for datetime/timezone handling (`zoneinfo`), `fnmatch` for glob matching, and clean data modeling via Pydantic. Python's expressiveness keeps the routing logic readable.
 - **FastAPI**: Async-ready, Pydantic-native web framework. Handles request/response validation, automatic OpenAPI docs, and clean path/query parameter parsing with minimal boilerplate. Exception handlers plug in naturally.
 - **Uvicorn**: ASGI server for FastAPI. Starts fast (well under the 10-second container startup requirement), single-worker is sufficient for a single-process in-memory service.
 - **Pydantic v2**: Data validation and serialization for all models. `model_validator` and `field_validator` give us granular control for the validation requirements (severity enum, IANA timezone, HH:MM format, ISO 8601 timestamps, etc.).

@@ -4,7 +4,7 @@ A configurable alert routing service that ingests monitoring alerts, evaluates t
 
 ## Language & Framework
 
-**Python 3.12 + FastAPI + Uvicorn**
+**Python 3.13 + FastAPI + Uvicorn**
 
 - **FastAPI** is Pydantic-native, so request validation and the `{"error": "..."}` 400 responses fall out naturally from model definitions — no separate validation layer to wire up.
 - **Pydantic v2** handles all input validation (enums, ISO 8601 timestamps, IANA timezones, HH:MM format, integer priority) via field/model validators.
@@ -38,6 +38,34 @@ The service will be ready on `http://localhost:8080` within a few seconds.
 | `POST` | `/reset` | Clear all state (routes, alerts, suppression windows, stats) |
 
 All endpoints accept and return JSON. Full request/response shapes are in the spec and covered in [`Design.md § API Endpoints`](./Design.md#api-endpoints).
+
+## Running Tests
+
+Create and activate a virtual environment first (Python 3.13 required — pydantic-core does not yet have wheels for 3.14):
+
+```bash
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+**Unit tests** (models, state, engine logic — no HTTP layer):
+
+```bash
+pytest tests/unit/ -v
+```
+
+**E2E tests** (full HTTP via FastAPI `TestClient`):
+
+```bash
+pytest tests/e2e/ -v
+```
+
+**All tests:**
+
+```bash
+pytest -v
+```
 
 ## Design Decisions
 
