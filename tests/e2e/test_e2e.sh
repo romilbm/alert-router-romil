@@ -462,6 +462,122 @@ assert_eq "Suppression: zero window never suppresses" \
   "$(echo "$BODY" | jq -r '.suppressed')" "false"
 
 # ---------------------------------------------------------------------------
+# Active Hours & Timezones
+# ---------------------------------------------------------------------------
+# America/New_York on 2026-03-25 = UTC-4 (after DST March 8)
+# Window 09:00–17:00 ET = 13:00–21:00 UTC
+#
+# INSIDE_ET   = 14:00 UTC = 10:00 ET ✓
+# BEFORE_ET   = 12:59 UTC = 08:59 ET ✗
+# AT_ET_START = 13:00 UTC = 09:00 ET ✓ (inclusive)
+# AT_ET_END   = 21:00 UTC = 17:00 ET ✗ (exclusive)
+# AFTER_ET    = 22:00 UTC = 18:00 ET ✗
+
+echo ""
+echo "=== Active Hours & Timezones ==="
+
+INSIDE_ET="2026-03-25T14:00:00Z"
+BEFORE_ET="2026-03-25T12:59:00Z"
+AT_ET_START="2026-03-25T13:00:00Z"
+AT_ET_END="2026-03-25T21:00:00Z"
+AFTER_ET="2026-03-25T22:00:00Z"
+
+AH_ROUTE='{
+  "id": "et-route",
+  "conditions": {},
+  "target": {"type": "slack", "channel": "#oncall"},
+  "priority": 10,
+  "active_hours": {"timezone": "America/New_York", "start": "09:00", "end": "17:00"}
+}'
+
+mk_ah_alert() {
+  printf '{"id":"%s","severity":"critical","service":"svc","group":"backend","timestamp":"%s"}' \
+    "$1" "$2"
+}
+
+# Alert inside ET window routes
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" -d "$AH_ROUTE" > /dev/null
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d "$(mk_ah_alert a1 $INSIDE_ET)")
+assert_eq "ActiveHours: inside ET window routes" \
+  "$(echo "$BODY" | jq -r '.routed_to.route_id')" "et-route"
+
+# Alert before ET window — unrouted
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d "$(mk_ah_alert a2 $BEFORE_ET)")
+assert_eq "ActiveHours: before ET window unrouted" \
+  "$(echo "$BODY" | jq -r '.routed_to')" "null"
+assert_eq "ActiveHours: before window routes_matched=0" \
+  "$(echo "$BODY" | jq '.evaluation_details.routes_matched')" "0"
+assert_eq "ActiveHours: before window matched_routes empty" \
+  "$(echo "$BODY" | jq '.matched_routes | length')" "0"
+
+# At start boundary — inclusive
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d "$(mk_ah_alert a3 $AT_ET_START)")
+assert_eq "ActiveHours: at start boundary (09:00 ET) routes" \
+  "$(echo "$BODY" | jq -r '.routed_to.route_id')" "et-route"
+
+# At end boundary — exclusive
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d "$(mk_ah_alert a4 $AT_ET_END)")
+assert_eq "ActiveHours: at end boundary (17:00 ET) not routed" \
+  "$(echo "$BODY" | jq -r '.routed_to')" "null"
+
+# After ET window
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d "$(mk_ah_alert a5 $AFTER_ET)")
+assert_eq "ActiveHours: after ET window unrouted" \
+  "$(echo "$BODY" | jq -r '.routed_to')" "null"
+
+# Fallback to lower-priority always-active route when outside active window
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" -d "$AH_ROUTE" > /dev/null
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"always","conditions":{},"target":{"type":"email","address":"ops@example.com"},"priority":1}' > /dev/null
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d "$(mk_ah_alert a1 $BEFORE_ET)")
+assert_eq "ActiveHours: fallback to always-on route outside window" \
+  "$(echo "$BODY" | jq -r '.routed_to.route_id')" "always"
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d "$(mk_ah_alert a2 $INSIDE_ET)")
+assert_eq "ActiveHours: higher-priority active route wins inside window" \
+  "$(echo "$BODY" | jq -r '.routed_to.route_id')" "et-route"
+
+# Midnight-crossing window (22:00–06:00 UTC)
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"night","conditions":{},"target":{"type":"slack","channel":"#night"},"priority":10,"active_hours":{"timezone":"UTC","start":"22:00","end":"06:00"}}' > /dev/null
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d "$(mk_ah_alert a1 '2026-03-25T23:30:00Z')")
+assert_eq "ActiveHours: midnight-crossing — 23:30 UTC in window" \
+  "$(echo "$BODY" | jq -r '.routed_to.route_id')" "night"
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d "$(mk_ah_alert a2 '2026-03-26T03:00:00Z')")
+assert_eq "ActiveHours: midnight-crossing — 03:00 UTC in window" \
+  "$(echo "$BODY" | jq -r '.routed_to.route_id')" "night"
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d "$(mk_ah_alert a3 '2026-03-25T08:00:00Z')")
+assert_eq "ActiveHours: midnight-crossing — 08:00 UTC outside window" \
+  "$(echo "$BODY" | jq -r '.routed_to')" "null"
+BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+  -d "$(mk_ah_alert a4 '2026-03-26T06:00:00Z')")
+assert_eq "ActiveHours: midnight-crossing — 06:00 UTC at end boundary (exclusive)" \
+  "$(echo "$BODY" | jq -r '.routed_to')" "null"
+
+# Route without active_hours is always active
+reset_state
+curl -s -X POST "$BASE/routes" -H "Content-Type: application/json" \
+  -d '{"id":"always","conditions":{},"target":{"type":"slack","channel":"#all"},"priority":5}' > /dev/null
+for TS in "$INSIDE_ET" "$BEFORE_ET" "$AFTER_ET"; do
+  BODY=$(curl -s -X POST "$BASE/alerts" -H "Content-Type: application/json" \
+    -d "$(mk_ah_alert "a-$TS" "$TS")")
+  assert_eq "ActiveHours: no active_hours route always matches ($TS)" \
+    "$(echo "$BODY" | jq -r '.routed_to.route_id')" "always"
+done
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 

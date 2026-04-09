@@ -1,8 +1,8 @@
 import fnmatch
-from datetime import timezone
-from datetime import timedelta
+from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
-from app.models import Alert, AlertResult, AppState, EvaluationDetails, RouteConfig, RoutedTo
+from app.models import ActiveHours, Alert, AlertResult, AppState, EvaluationDetails, RouteConfig, RoutedTo
 
 
 def matches_conditions(alert: Alert, route: RouteConfig) -> bool:
@@ -29,6 +29,25 @@ def matches_conditions(alert: Alert, route: RouteConfig) -> bool:
     return True
 
 
+def _is_within_active_hours(alert_timestamp, active_hours: ActiveHours) -> bool:
+    """Return True if alert_timestamp falls within the active_hours window.
+
+    Uses the alert's timestamp (not wall clock). Handles midnight-crossing
+    windows (start > end) with an OR condition.
+    start is inclusive, end is exclusive.
+    """
+    local_time = alert_timestamp.astimezone(ZoneInfo(active_hours.timezone)).time()
+    start = datetime.strptime(active_hours.start, "%H:%M").time()
+    end   = datetime.strptime(active_hours.end,   "%H:%M").time()
+
+    if start <= end:
+        # Normal same-day window e.g. 09:00–17:00
+        return start <= local_time < end
+    else:
+        # Overnight window e.g. 22:00–06:00
+        return local_time >= start or local_time < end
+
+
 def evaluate_alert(alert: Alert, state: AppState, dry_run: bool = False) -> AlertResult:
     """
     Evaluate an alert against all routes and return an AlertResult.
@@ -36,7 +55,8 @@ def evaluate_alert(alert: Alert, state: AppState, dry_run: bool = False) -> Aler
     Steps:
       1. Gather all routes.
       2. Filter to those whose conditions match the alert.
-      3. (active_hours check — deferred)
+      3. Active hours check — remove routes whose window doesn't cover
+         the alert's timestamp (counted as not matched).
       4. Sort matching routes by priority descending.
       5. Winner = highest-priority match.
       6. Suppression check on winner (uses alert.timestamp, not wall clock).
@@ -47,6 +67,10 @@ def evaluate_alert(alert: Alert, state: AppState, dry_run: bool = False) -> Aler
     total_evaluated = len(all_routes)
 
     matching_routes = [r for r in all_routes if matches_conditions(alert, r)]
+    matching_routes = [
+        r for r in matching_routes
+        if r.active_hours is None or _is_within_active_hours(alert.timestamp, r.active_hours)
+    ]
     matching_routes.sort(key=lambda r: r.priority, reverse=True)
 
     matched_route_ids = [r.id for r in matching_routes]
