@@ -1,9 +1,10 @@
 import re
+import threading
 from datetime import datetime
 from typing import Dict, List, Literal, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_serializer, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -71,12 +72,30 @@ class Target(BaseModel):
             raise ValueError("webhook target requires 'url'")
         return self
 
+    @model_serializer(mode="wrap")
+    def serialize_without_nones(self, handler) -> Dict:
+        return {k: v for k, v in handler(self).items() if v is not None}
+
+
+_VALID_SEVERITIES = {"critical", "warning", "info"}
+
 
 class Conditions(BaseModel):
     severity: Optional[List[str]] = None
     service: Optional[List[str]] = None   # supports glob patterns
     group: Optional[List[str]] = None
     labels: Optional[Dict[str, str]] = None
+
+    @field_validator("severity")
+    @classmethod
+    def validate_severity_values(cls, v):
+        if v is not None:
+            invalid = [s for s in v if s not in _VALID_SEVERITIES]
+            if invalid:
+                raise ValueError(
+                    f"Invalid severity value(s): {invalid}. Must be one of: critical, warning, info"
+                )
+        return v
 
 
 class RouteConfig(BaseModel):
@@ -162,6 +181,7 @@ class AppState:
         # (route_id, service) -> expiry datetime (UTC, timezone-aware)
         self.suppression_windows: Dict[Tuple[str, str], datetime] = {}
         self.stats: Stats = Stats()
+        self._lock: threading.Lock = threading.Lock()
 
     def reset(self) -> None:
         self.routes.clear()

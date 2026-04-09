@@ -257,3 +257,117 @@ class TestRouteValidation:
         body = {**SLACK_ROUTE, "active_hours": {"timezone": "UTC", "start": "25:00", "end": "17:00"}}
         resp = client.post("/routes", json=body)
         assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Target serialization — null fields omitted in responses (fix #1)
+# ---------------------------------------------------------------------------
+
+class TestTargetResponseShape:
+    def test_slack_target_omits_null_fields_in_get_routes(self, client: TestClient):
+        client.post("/routes", json=SLACK_ROUTE)
+        route = client.get("/routes").json()["routes"][0]
+        target = route["target"]
+        assert "address" not in target
+        assert "service_key" not in target
+        assert "url" not in target
+        assert "headers" not in target
+
+    def test_slack_target_has_type_and_channel(self, client: TestClient):
+        client.post("/routes", json=SLACK_ROUTE)
+        route = client.get("/routes").json()["routes"][0]
+        assert route["target"]["type"] == "slack"
+        assert route["target"]["channel"] == "#oncall"
+
+    def test_alert_response_target_omits_null_fields(self, client: TestClient):
+        client.post("/routes", json=SLACK_ROUTE)
+        body = client.post("/alerts", json={
+            "id": "a1", "severity": "critical", "service": "payment-api",
+            "group": "backend", "timestamp": "2026-03-25T14:00:00Z",
+        }).json()
+        target = body["routed_to"]["target"]
+        assert "address" not in target
+        assert "service_key" not in target
+        assert "url" not in target
+
+
+# ---------------------------------------------------------------------------
+# Conditions severity validation (fix #2)
+# ---------------------------------------------------------------------------
+
+class TestConditionsSeverityValidation:
+    def test_invalid_severity_in_conditions_returns_400(self, client: TestClient):
+        resp = client.post("/routes", json={
+            **SLACK_ROUTE,
+            "conditions": {"severity": ["urgent"]},
+        })
+        assert resp.status_code == 400
+        assert "severity" in resp.json()["error"].lower()
+
+    def test_mixed_valid_invalid_severity_returns_400(self, client: TestClient):
+        resp = client.post("/routes", json={
+            **SLACK_ROUTE,
+            "conditions": {"severity": ["critical", "unknown"]},
+        })
+        assert resp.status_code == 400
+
+    def test_valid_severity_values_accepted(self, client: TestClient):
+        resp = client.post("/routes", json={
+            **SLACK_ROUTE,
+            "conditions": {"severity": ["critical", "warning", "info"]},
+        })
+        assert resp.status_code == 201
+
+
+# ---------------------------------------------------------------------------
+# DELETE clears suppression windows (fix #4)
+# ---------------------------------------------------------------------------
+
+class TestDeleteClearsSuppressionWindows:
+    def test_recreated_route_not_suppressed_by_stale_window(self, client: TestClient):
+        route = {
+            "id": "r1", "conditions": {},
+            "target": {"type": "slack", "channel": "#x"},
+            "priority": 10, "suppression_window_seconds": 300,
+        }
+        client.post("/routes", json=route)
+        # Trigger a suppression window
+        client.post("/alerts", json={
+            "id": "a1", "severity": "critical", "service": "payment-api",
+            "group": "g", "timestamp": "2026-03-25T14:00:00Z",
+        })
+        # Delete the route — should clear its suppression windows
+        client.delete("/routes/r1")
+        # Recreate the same route
+        client.post("/routes", json=route)
+        # First alert after recreation must NOT be suppressed
+        body = client.post("/alerts", json={
+            "id": "a2", "severity": "critical", "service": "payment-api",
+            "group": "g", "timestamp": "2026-03-25T14:01:00Z",
+        }).json()
+        assert body["suppressed"] is False
+        assert body["routed_to"]["route_id"] == "r1"
+
+    def test_delete_clears_only_matching_route_windows(self, client: TestClient):
+        for rid in ("r1", "r2"):
+            client.post("/routes", json={
+                "id": rid, "conditions": {"service": [rid]},
+                "target": {"type": "slack", "channel": f"#{rid}"},
+                "priority": 10, "suppression_window_seconds": 300,
+            })
+        client.post("/alerts", json={
+            "id": "a1", "severity": "critical", "service": "r1",
+            "group": "g", "timestamp": "2026-03-25T14:00:00Z",
+        })
+        client.post("/alerts", json={
+            "id": "a2", "severity": "critical", "service": "r2",
+            "group": "g", "timestamp": "2026-03-25T14:00:00Z",
+        })
+        # Delete r1 — r2's window should be unaffected
+        client.delete("/routes/r1")
+        body = client.post("/alerts", json={
+            "id": "a3", "severity": "critical", "service": "r2",
+            "group": "g", "timestamp": "2026-03-25T14:01:00Z",
+        }).json()
+        assert body["suppressed"] is True
+        assert body["routed_to"]["route_id"] == "r2"

@@ -95,6 +95,19 @@ class Target(BaseModel):
     url: Optional[str] = None           # webhook
     headers: Optional[Dict[str, str]] = None  # webhook optional
 
+The same `Target` model is used for both input and output. All type-specific fields default to `None` on input (so callers only need to supply the relevant field). On output, a `model_serializer` strips `None` values before serialization, so responses contain only the fields that apply to the chosen type:
+
+```json
+// Slack target in a response — address/service_key/url/headers are absent, not null
+{"type": "slack", "channel": "#oncall"}
+
+// Webhook target with optional headers
+{"type": "webhook", "url": "https://hooks.example.com/alert", "headers": {"X-Token": "s"}}
+
+// Webhook target without headers — headers key is absent entirely
+{"type": "webhook", "url": "https://hooks.example.com/alert"}
+```
+
 class Conditions(BaseModel):
     severity: Optional[List[str]] = None
     service: Optional[List[str]] = None   # supports glob patterns
@@ -289,6 +302,7 @@ Key validators:
 | `Target.type` | `Literal` type | Not one of `slack/email/pagerduty/webhook` |
 | `Target` fields | `model_validator(mode='after')` | Missing required type-specific field |
 | `ActiveHours.timezone` | `field_validator` | Invalid IANA timezone string |
+| `Conditions.severity` | `field_validator` | Value not in `critical/warning/info` |
 | `ActiveHours.start/end` | `field_validator` | Not `HH:MM` format |
 
 ### Exception handlers in `main.py`
@@ -387,8 +401,8 @@ The spec examples don't cover overnight windows (e.g., `"22:00"` to `"06:00"`). 
 ### 5. Re-submitted alert IDs
 `POST /alerts` with an existing `id` replaces the stored `AlertResult` with the new evaluation result. The routing is fully re-evaluated against current routes. Stats are not rolled back for the old result.
 
-### 6. Route deletion with active suppression windows
-If a route is deleted, its suppression windows remain in `state.suppression_windows`. This is harmless — the deleted route will never be selected as a winner again. No cleanup needed.
+### 6. Route deletion clears suppression windows
+When a route is deleted via `DELETE /routes/{id}`, all suppression windows keyed to that route ID are removed from `state.suppression_windows`. This ensures that if the same route ID is later recreated, it starts with a clean slate — the first alert through the new route will not be incorrectly suppressed by a window set under the previous incarnation.
 
 ### 7. Empty `conditions` object matches all alerts
 A `RouteConfig` with `conditions: {}` (all fields `None`) must match every alert. This is the "catch-all" route pattern. Ensure the matching logic defaults to `True` for each unset condition field.
@@ -399,13 +413,16 @@ The dry-run path must read from `state.suppression_windows` to compute the corre
 ### 9. `matched_routes` always reflects all condition+active_hours matches, regardless of suppression
 `matched_routes` is computed before the suppression check and must contain every route that passed both condition matching and the active hours check — regardless of the final outcome (routed, suppressed, or unrouted). Suppression only controls whether a notification is produced; it does not filter `matched_routes`. The suppressed response example in the spec shows `["route-1"]` because only one route matched in that scenario, not because suppression trimmed the list. When unrouted (no routes matched), `matched_routes` is `[]`.
 
-### 10. `priority` must be an integer — reject floats
+### 10. Route condition severities are validated
+`Conditions.severity` uses a `field_validator` to reject values that are not one of `critical`, `warning`, `info`. A route created with `{"severity": ["urgent"]}` would silently never match any alert — we validate eagerly and return a 400 instead.
+
+### 11. `priority` must be an integer — reject floats
 Pydantic v2 by default coerces `10.0` to `10` in lax mode. Use `model_config = ConfigDict(strict=True)` on `RouteConfig` or a `field_validator` to reject non-integer priority values explicitly.
 
-### 11. `evaluation_details.routes_matched` counts routes that passed condition + active_hours
+### 12. `evaluation_details.routes_matched` counts routes that passed condition + active_hours
 The active hours check is part of "matching." A route that fails the active hours check should be counted in `routes_not_matched`, not `routes_matched`.
 
-### 12. Timezone validation must reject unknown strings
+### 13. Timezone validation must reject unknown strings
 `zoneinfo.ZoneInfo("Invalid/Zone")` raises `ZoneInfoNotFoundError`. Catch this in the `field_validator` and raise a `ValueError` with a clear message. This also correctly rejects strings like `"EST"` which are not valid IANA zone names.
 
 ---

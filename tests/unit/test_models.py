@@ -302,3 +302,78 @@ class TestConditions:
         c = Conditions(severity=["critical"])
         assert c.severity == ["critical"]
         assert c.service is None
+
+
+# ---------------------------------------------------------------------------
+# Target — serialization excludes None fields (fix #1)
+# ---------------------------------------------------------------------------
+
+class TestTargetSerialization:
+    def test_slack_target_omits_null_fields(self):
+        t = Target(type="slack", channel="#oncall")
+        d = t.model_dump()
+        assert "address" not in d
+        assert "service_key" not in d
+        assert "url" not in d
+        assert "headers" not in d
+
+    def test_email_target_omits_null_fields(self):
+        t = Target(type="email", address="ops@example.com")
+        d = t.model_dump()
+        assert "channel" not in d
+        assert "service_key" not in d
+        assert "url" not in d
+
+    def test_pagerduty_target_omits_null_fields(self):
+        t = Target(type="pagerduty", service_key="abc123")
+        d = t.model_dump()
+        assert "channel" not in d
+        assert "address" not in d
+        assert "url" not in d
+
+    def test_webhook_target_with_headers_included(self):
+        t = Target(type="webhook", url="https://hooks.example.com", headers={"X-Token": "s"})
+        d = t.model_dump()
+        assert d["url"] == "https://hooks.example.com"
+        assert d["headers"] == {"X-Token": "s"}
+
+    def test_webhook_target_without_headers_omits_it(self):
+        t = Target(type="webhook", url="https://hooks.example.com")
+        d = t.model_dump()
+        assert "headers" not in d
+
+    def test_type_and_relevant_field_always_present(self):
+        t = Target(type="slack", channel="#oncall")
+        d = t.model_dump()
+        assert d["type"] == "slack"
+        assert d["channel"] == "#oncall"
+
+
+# ---------------------------------------------------------------------------
+# Conditions — severity values validated (fix #2)
+# ---------------------------------------------------------------------------
+
+class TestConditionsSeverityValidation:
+    def test_valid_severity_values_accepted(self):
+        c = Conditions(severity=["critical", "warning", "info"])
+        assert c.severity == ["critical", "warning", "info"]
+
+    def test_invalid_severity_value_raises(self):
+        with pytest.raises(ValidationError, match="Invalid severity"):
+            Conditions(severity=["urgent"])
+
+    def test_mixed_valid_invalid_raises(self):
+        with pytest.raises(ValidationError, match="Invalid severity"):
+            Conditions(severity=["critical", "unknown"])
+
+    def test_none_severity_still_valid(self):
+        c = Conditions()
+        assert c.severity is None
+
+    def test_invalid_severity_in_route_returns_400_via_post(self):
+        # Tested at the model level; the validator raises ValidationError
+        with pytest.raises(ValidationError):
+            RouteConfig(**{
+                **VALID_ROUTE,
+                "conditions": {"severity": ["urgent"]},
+            })

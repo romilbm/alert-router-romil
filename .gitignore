@@ -8,3 +8,4 @@ dist/
 build/
 .claude.json
 .claude/
+*.pdf

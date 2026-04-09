@@ -213,6 +213,9 @@ Alert evaluation follows a strict pipeline (see [`Design.md § Routing Engine`](
 - **Suppression timestamps** use `alert.timestamp`, not wall-clock time — backdated alerts can slip through, future-dated alerts set windows far ahead. Both are correct per spec.
 - **Glob service matching**: the pattern lives on the route, the value on the alert. `fnmatch("payment-api", "payment-*")` → `True`.
 - **Active hours boundaries**: `start` is inclusive, `end` is exclusive. Overnight windows (e.g., `22:00`–`06:00`) are handled with OR logic.
+- **Target response shape**: the same `Target` model is used for input and output. On output, `None` fields are omitted — a Slack target serializes as `{"type": "slack", "channel": "#oncall"}`, not a blob of `"address": null, "service_key": null, ...`.
+- **Concurrency**: the suppression check-and-set is protected by a `threading.Lock` on `AppState`, preventing two concurrent requests from both reading "no window" and both routing when only one should.
+- **DELETE clears suppression windows**: deleting a route removes its suppression windows so a recreated route with the same ID starts fresh.
 
 ---
 
@@ -231,6 +234,7 @@ All validation is enforced via Pydantic v2 validators and returns `400 Bad Reque
 | `Target` (email) | Missing `address` |
 | `Target` (pagerduty) | Missing `service_key` |
 | `Target` (webhook) | Missing `url` |
+| `Conditions.severity` | Value not in `critical`, `warning`, `info` (silent never-match prevented) |
 | `ActiveHours.timezone` | Invalid IANA timezone string (e.g., `"EST"`, `""`) |
 | `ActiveHours.start` / `.end` | Not `HH:MM` format (leading zeros required) |
 
@@ -264,7 +268,7 @@ bash tests/e2e/test_e2e.sh
 
 The shell suite covers Route CRUD, Route Validation, Basic Routing, Suppression Windows, Active Hours & Timezones, Query and Filtering, Stats, Dry-run, and Full Reset.
 
-Current test count: **406 pytest tests** (unit + e2e), all passing.
+Current test count: **425 pytest tests** (unit + e2e), all passing.
 
 ---
 

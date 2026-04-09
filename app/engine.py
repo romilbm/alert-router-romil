@@ -79,43 +79,44 @@ def evaluate_alert(alert: Alert, state: AppState, dry_run: bool = False) -> Aler
     suppressed = False
     suppression_reason = None
 
-    if winner is not None and winner.suppression_window_seconds > 0:
-        key = (winner.id, alert.service)
-        expiry = state.suppression_windows.get(key)
-        if expiry is not None and alert.timestamp < expiry:
-            # Within active window — suppress. Do NOT update the window.
-            suppressed = True
-            expiry_utc = expiry.astimezone(timezone.utc)
-            suppression_reason = (
-                f"Alert for service '{alert.service}' on route '{winner.id}' "
-                f"suppressed until {expiry_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-            )
-        elif not dry_run:
-            # No active window (or expired) — route and set a fresh window.
-            state.suppression_windows[key] = (
-                alert.timestamp + timedelta(seconds=winner.suppression_window_seconds)
-            )
+    with state._lock:
+        if winner is not None and winner.suppression_window_seconds > 0:
+            key = (winner.id, alert.service)
+            expiry = state.suppression_windows.get(key)
+            if expiry is not None and alert.timestamp < expiry:
+                # Within active window — suppress. Do NOT update the window.
+                suppressed = True
+                expiry_utc = expiry.astimezone(timezone.utc)
+                suppression_reason = (
+                    f"Alert for service '{alert.service}' on route '{winner.id}' "
+                    f"suppressed until {expiry_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                )
+            elif not dry_run:
+                # No active window (or expired) — route and set a fresh window.
+                state.suppression_windows[key] = (
+                    alert.timestamp + timedelta(seconds=winner.suppression_window_seconds)
+                )
 
-    routed_to = RoutedTo(route_id=winner.id, target=winner.target) if winner else None
+        routed_to = RoutedTo(route_id=winner.id, target=winner.target) if winner else None
 
-    result = AlertResult(
-        alert_id=alert.id,
-        routed_to=routed_to,
-        suppressed=suppressed,
-        suppression_reason=suppression_reason,
-        matched_routes=matched_route_ids,
-        evaluation_details=EvaluationDetails(
-            total_routes_evaluated=total_evaluated,
-            routes_matched=len(matching_routes),
-            routes_not_matched=total_evaluated - len(matching_routes),
-            suppression_applied=suppressed,
-        ),
-    )
+        result = AlertResult(
+            alert_id=alert.id,
+            routed_to=routed_to,
+            suppressed=suppressed,
+            suppression_reason=suppression_reason,
+            matched_routes=matched_route_ids,
+            evaluation_details=EvaluationDetails(
+                total_routes_evaluated=total_evaluated,
+                routes_matched=len(matching_routes),
+                routes_not_matched=total_evaluated - len(matching_routes),
+                suppression_applied=suppressed,
+            ),
+        )
 
-    if not dry_run:
-        state.alerts[alert.id] = result
-        state.alert_inputs[alert.id] = alert
-        _update_stats(alert, result, winner, state)
+        if not dry_run:
+            state.alerts[alert.id] = result
+            state.alert_inputs[alert.id] = alert
+            _update_stats(alert, result, winner, state)
 
     return result
 
